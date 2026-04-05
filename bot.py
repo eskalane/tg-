@@ -128,7 +128,7 @@ def _link_usable(url: str) -> bool:
     return len(u) > 8 and (u.startswith("https://") or u.startswith("http://"))
 
 
-def mod_caption_html(mod_id: str, downloads: int) -> str:
+def mod_caption_html(mod_id: str, downloads: int, *, reveal_download: bool = False) -> str:
     m = MODS[mod_id]
     title = html.escape(m["title"])
     overview_raw = (m.get("overview_url") or "").strip()
@@ -143,17 +143,17 @@ def mod_caption_html(mod_id: str, downloads: int) -> str:
     lines = [f"<b>{title}</b>", "", overview_line, ""]
 
     if _link_usable(dl_raw):
-        du = html.escape(dl_raw, quote=True)
-        lines.append(f'<b>Скачать:</b> <a href="{du}">ссылка</a>')
-        lines.append("")
+        if reveal_download:
+            du = html.escape(dl_raw, quote=True)
+            du_plain = html.escape(dl_raw)
+            lines.append(f'<b>Скачать:</b> <a href="{du}">ссылка</a>')
+            lines.append(f"<code>{du_plain}</code>")
+            lines.append("")
     else:
         lines.append("<b>Скачать:</b> ссылки на скачивание нет")
         lines.append("")
 
     lines.append(f"<b>Счётчик скачиваний:</b> {downloads}")
-    if _link_usable(dl_raw):
-        lines.append("")
-        lines.append("<i>После скачивания нажми «Учесть скачивание» под фото.</i>")
     return "\n".join(lines)
 
 
@@ -217,16 +217,9 @@ def mods_list_keyboard() -> InlineKeyboardMarkup:
 
 
 def mod_detail_keyboard(mod_id: str) -> InlineKeyboardMarkup:
-    mod = MODS[mod_id]
-    dl = (mod.get("download_url") or "").strip()
-    rows: list[list[InlineKeyboardButton]] = []
-    if _link_usable(dl):
-        rows.append([InlineKeyboardButton("Скачать", url=dl)])
-        rows.append(
-            [InlineKeyboardButton("Учесть скачивание", callback_data=f"cnt_{mod_id}")]
-        )
-    else:
-        rows.append([InlineKeyboardButton("Скачать", callback_data=f"dl_{mod_id}")])
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("Скачать", callback_data=f"dl_{mod_id}")],
+    ]
     rows.append([InlineKeyboardButton("« К списку модов", callback_data=CB_MODS)])
     rows.append([InlineKeyboardButton("« В главное меню", callback_data=CB_MAIN)])
     return InlineKeyboardMarkup(rows)
@@ -357,7 +350,7 @@ async def send_mod_detail_screen(
     await send_with_banner(
         context,
         chat_id,
-        mod_caption_html(mod_id, n),
+        mod_caption_html(mod_id, n, reveal_download=False),
         mod_detail_keyboard(mod_id),
         parse_mode=ParseMode.HTML,
     )
@@ -377,8 +370,10 @@ async def _edit_mod_message_caption(
     query,
     mod_id: str,
     downloads: int,
+    *,
+    reveal_download: bool,
 ) -> None:
-    caption = mod_caption_html(mod_id, downloads)
+    caption = mod_caption_html(mod_id, downloads, reveal_download=reveal_download)
     kb = mod_detail_keyboard(mod_id)
     try:
         if query.message.photo:
@@ -401,7 +396,7 @@ async def handle_mod_download(
     query,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Кнопка «Скачать» без URL в .env — только подсказка."""
+    """Скачать: +1 к счётчику и показ ссылки в подписи к сообщению."""
     if not query.from_user or not query.message or not query.data:
         return
     user_id = query.from_user.id
@@ -415,41 +410,17 @@ async def handle_mod_download(
         return
 
     dl = (MODS[mod_id].get("download_url") or "").strip()
-    if _link_usable(dl):
-        await query.answer()
-        return
-
-    await query.answer(
-        "Ссылка на скачивание не задана. В .env укажи MOD_*_DOWNLOAD_URL=https://... "
-        "и перезапусти бота.",
-        show_alert=True,
-    )
-
-
-async def handle_mod_count(
-    query,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """+1 к счётчику после того, как пользователь скачал файл по ссылке."""
-    if not query.from_user or not query.message or not query.data:
-        return
-    user_id = query.from_user.id
-    if not await is_user_subscribed(context, user_id):
-        await query.answer("Сначала подпишись на канал.", show_alert=True)
-        return
-
-    mod_id = query.data.removeprefix("cnt_")
-    if mod_id not in MODS:
-        await query.answer("Ошибка.", show_alert=True)
-        return
-
-    if not _link_usable((MODS[mod_id].get("download_url") or "").strip()):
-        await query.answer("Сначала настрой ссылку на скачивание в .env.", show_alert=True)
+    if not _link_usable(dl):
+        await query.answer(
+            "Ссылка на скачивание не задана. В .env укажи MOD_*_DOWNLOAD_URL=https://... "
+            "и перезапусти бота.",
+            show_alert=True,
+        )
         return
 
     count = increment_mod_downloads(mod_id)
-    await _edit_mod_message_caption(query, mod_id, count)
-    await query.answer("Засчитано!")
+    await _edit_mod_message_caption(query, mod_id, count, reveal_download=True)
+    await query.answer("Ссылка добавлена в сообщение")
 
 
 async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -515,10 +486,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data.startswith("dl_"):
         await handle_mod_download(query, context)
-        return
-
-    if data.startswith("cnt_"):
-        await handle_mod_count(query, context)
         return
 
     if not await is_user_subscribed(context, user_id):
@@ -591,7 +558,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             on_callback,
-            pattern=r"^(check_sub|menu_promo|menu_mods|menu_support|menu_main|mod_[a-z0-9_]+|dl_[a-z0-9_]+|cnt_[a-z0-9_]+)$",
+            pattern=r"^(check_sub|menu_promo|menu_mods|menu_support|menu_main|mod_[a-z0-9_]+|dl_[a-z0-9_]+)$",
         )
     )
     app.add_handler(MessageHandler(filters.TEXT, on_text))
